@@ -1,2 +1,1 @@
-# tradingview-macd-dca-backtester
-Strategy TradingView Pine Script pour backtester MACD croisements + DCA.  Accumulation progressive entre signaux haut/bas. Résultats complets : P&amp;L,  win rate, statistiques par trade. Analysez la rentabilité de votre stratégie  MACD sur n'importe quel timeframe et actif.
+TradingView Pine Script strategy to backtest MACD crossovers + DCA. Progressive accumulation between high/low signals. Full results: P&L, win rate, per-trade statistics. Analyze the profitability of your MACD strategy on any timeframe and asset.
