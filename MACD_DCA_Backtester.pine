@@ -1,0 +1,339 @@
+// ===== SECTION 1: HEADER & METADATA =====
+//@version=5
+indicator(
+     "MACD DCA Backtest Strategy",
+     overlay=false,
+     max_bars_back=500, // Increased for long-term MACD calculations
+     max_lines_count=500, // Allow more lines for table display
+     max_labels_count=500, // Allow more labels for summary
+     max_boxes_count=500 // Allow more boxes for summary
+     )
+
+// ===== SECTION 2: DOCUMENTATION =====
+// =============================================================================
+// Strategy:      MACD Dollar-Cost Averaging (DCA) Backtester
+// Description:   This script provides a comprehensive backtest of a Dollar-Cost
+//                Averaging (DCA) strategy triggered by MACD crossover signals.
+//                It simulates investing a fixed amount on each bar while a
+//                position is open and presents the results in a detailed table,
+//                along with global performance statistics. This tool is intended
+//                for strategy validation and analysis.
+// Version:       1.0 - Initial Release
+// Author:        Jules
+// =============================================================================
+
+// ===== SECTION 3: TYPES & CONSTANTS =====
+// --- Types ---
+// Defines the data structure for a single completed trade, holding all 18 KPIs.
+type Trade
+    // Dates & Duration
+    string entry_date           // Entry date in "YYYY-MM-DD" format
+    string exit_date            // Exit date in "YYYY-MM-DD" format
+    int entry_bar_index         // The bar index of the trade's entry signal
+    int exit_bar_index          // The bar index of the trade's exit signal
+    int candle_count            // The number of candles where buys occurred (DCA bars)
+    // Investment & Accumulation
+    float total_invested        // The total amount invested in the trade
+    float average_price         // The average price paid per unit of the asset
+    float quantity              // The total quantity of the asset purchased
+    // Exit & P&L
+    float exit_price            // The price at which the asset was sold
+    float amount_sold           // The total amount received from the sale
+    float pnl                   // The net profit or loss (Amount Sold - Total Invested)
+    float pnl_percent           // The P&L as a percentage of the total investment
+    float roi                   // Return on Investment (same as pnl_percent)
+    // Analytics
+    float high_period           // The highest price reached during the trade
+    float low_period            // The lowest price reached during the trade
+    float movement_percent      // The percentage movement from the period low to high
+    float volume_total          // The total volume traded during the position
+    float volume_avg            // The average volume per DCA bar
+    float gain_per_candle       // The average P&L generated per DCA bar
+    string win_loss_text        // "WIN" or "LOSS"
+
+// --- Constants ---
+// No global constants are defined for this version.
+
+// ===== SECTION 4: INPUTS & CONFIGURATION =====
+// --- Investment Settings ---
+investment_per_candle = input.float(5.0, "Investment per Candle", minval=0.01, step=0.01, group="Investment Settings", tooltip="The fixed amount to invest on each bar while a position is open.")
+
+// --- MACD Settings ---
+macd_fast = input.int(12, "MACD Fast Length", minval=1, group="MACD Settings", tooltip="The length of the fast-moving average for the MACD calculation.")
+macd_slow = input.int(26, "MACD Slow Length", minval=1, group="MACD Settings", tooltip="The length of the slow-moving average for the MACD calculation.")
+macd_signal = input.int(9, "MACD Signal Length", minval=1, group="MACD Settings", tooltip="The length of the signal line for the MACD calculation.")
+
+
+// ===== SECTION 5: GLOBAL VARIABLES (State) =====
+// These variables maintain their state across bar calculations.
+// --- Position State ---
+var bool position_open = false      // Tracks if a trade is currently active.
+var int entry_bar_index = na        // Stores the entry bar index of the current trade.
+
+// --- Accumulation Variables ---
+// These variables accumulate data during an open trade.
+var int buy_candle_count = 0        // Counts the number of DCA buys.
+var float quantity_temp = 0.0       // Accumulates the total quantity of the asset purchased.
+var float high_period_temp = 0.0    // Tracks the highest price during the trade.
+var float low_period_temp = 0.0     // Tracks the lowest price during the trade.
+var float volume_total_temp = 0.0   // Accumulates the total volume during the trade.
+
+// --- Storage ---
+// Stores all completed trades for final display.
+var array<Trade> trades = array.new<Trade>()
+
+
+// ===== SECTION 6: HELPER FUNCTIONS =====
+// --- Date Formatting ---
+f_timestamp_to_datestring(ts) =>
+    // Converts a Unix timestamp to a "YYYY-MM-DD" string.
+    _year = str.tostring(year(ts))
+    _month = month(ts) < 10 ? "0" + str.tostring(month(ts)) : str.tostring(month(ts))
+    _day = dayofmonth(ts) < 10 ? "0" + str.tostring(dayofmonth(ts)) : str.tostring(dayofmonth(ts))
+    _year + "-" + _month + "-" + _day
+
+
+// ===== SECTION 7: MAIN LOGIC (On-bar) =====
+// This is the core logic that executes on every bar of the chart.
+
+// --- Step 1: MACD Calculation ---
+// Calculate the MACD, signal line, and histogram. `_` discards the histogram value.
+[macd, signal, _] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// --- Step 2: Crossover Detection ---
+// Identify bullish (buy) and bearish (sell) signals.
+crossover_up = ta.crossover(macd, signal)
+crossover_down = ta.crossunder(macd, signal)
+
+// --- Step 3: Position State Management & Data Accumulation ---
+if not position_open and crossover_up
+    // A new trade is opened on the bullish crossover.
+    // Initialize all state variables for the new trade.
+    position_open := true
+    entry_bar_index := bar_index
+
+    // Reset accumulation variables, initializing with the entry bar's data.
+    buy_candle_count := 0
+    quantity_temp := 0.0
+    high_period_temp := high
+    low_period_temp := low
+    volume_total_temp := volume
+
+else if position_open
+    // A trade is currently open. Check if it should be closed or if we should continue accumulating.
+    if crossover_down
+        // The trade is closed on the bearish crossover.
+        // The closing bar's data is NOT included in the period's H, L, or Volume stats.
+        position_open := false
+
+        // --- KPI Calculation & Trade Storage ---
+        // A trade is only valid if at least one DCA buy has occurred.
+        if buy_candle_count > 0
+            exit_bar_index = bar_index
+
+            // Perform all KPI calculations with division-by-zero checks.
+            _total_invested = investment_per_candle * buy_candle_count
+            _quantity = quantity_temp
+            _average_price = _quantity > 0 ? _total_invested / _quantity : 0
+            _exit_price = close
+            _amount_sold = _quantity * _exit_price
+            _pnl = _amount_sold - _total_invested
+            _pnl_percent = _total_invested > 0 ? (_pnl / _total_invested) * 100 : 0.0
+            _movement_percent = low_period_temp > 0 ? ((high_period_temp - low_period_temp) / low_period_temp) * 100 : 0.0
+            _volume_avg = buy_candle_count > 0 ? volume_total_temp / buy_candle_count : 0
+            _gain_per_candle = buy_candle_count > 0 ? _pnl / buy_candle_count : 0.0
+
+            // Create a new Trade object with all calculated data.
+            new_trade = Trade.new(
+                 entry_date = f_timestamp_to_datestring(time[entry_bar_index]),
+                 exit_date = f_timestamp_to_datestring(time),
+                 entry_bar_index = entry_bar_index,
+                 exit_bar_index = exit_bar_index,
+                 candle_count = buy_candle_count,
+                 total_invested = _total_invested,
+                 average_price = _average_price,
+                 quantity = _quantity,
+                 exit_price = _exit_price,
+                 amount_sold = _amount_sold,
+                 pnl = _pnl,
+                 pnl_percent = _pnl_percent,
+                 roi = _pnl_percent,
+                 high_period = high_period_temp,
+                 low_period = low_period_temp,
+                 movement_percent = _movement_percent,
+                 volume_total = volume_total_temp,
+                 volume_avg = _volume_avg,
+                 gain_per_candle = _gain_per_candle,
+                 win_loss_text = _pnl > 0 ? "WIN" : "LOSS"
+                 )
+
+            // Add the completed trade to the global array.
+            array.push(trades, new_trade)
+
+    else
+        // This is a DCA bar. An investment is made.
+        // Accumulate data for KPI calculation.
+        buy_candle_count += 1
+        mid_price = (high + low) / 2
+        quantity_temp += investment_per_candle / mid_price
+        high_period_temp := math.max(high_period_temp, high)
+        low_period_temp := math.min(low_period_temp, low)
+        volume_total_temp += volume
+
+
+// ===== SECTION 8: DISPLAY =====
+// This block executes only on the last bar to draw the final results.
+if barstate.islast
+    // Define colors from hex codes for better readability and adherence to specs.
+    color HEADER_BG_COLOR = color.new(color.from_hex("#2C3E50"), 0)
+    color WIN_BG_COLOR = color.new(color.from_hex("#D4EDDA"), 0)
+    color LOSS_BG_COLOR = color.new(color.from_hex("#F8D7DA"), 0)
+    color TEXT_COLOR_DARK = color.new(color.white, 0)
+    color TEXT_COLOR_LIGHT = color.new(color.black, 0)
+
+    // --- Create Trade Table (US-9) ---
+    // The table is declared with `var` to ensure it's created only once.
+    // It's sized to fit all trades plus a header row.
+    var table trades_table = table.new(position.top_right, 18, array.size(trades) + 2, border_width=1)
+
+    if array.size(trades) > 0
+        // --- Table Headers ---
+        // Using a consistent style for all header cells.
+        table.cell(trades_table, 0, 0, "Entry Date", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 1, 0, "Exit Date", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 2, 0, "Bars", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 3, 0, "Invested (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 4, 0, "Avg Price (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 5, 0, "Exit Price (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 6, 0, "Quantity", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 7, 0, "Sold (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 8, 0, "High", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 9, 0, "Low", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 10, 0, "% Move", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 11, 0, "Total Vol", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 12, 0, "Avg Vol", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 13, 0, "P&L (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 14, 0, "P&L (%)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 15, 0, "ROI (%)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 16, 0, "W/L", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+        table.cell(trades_table, 17, 0, "Gain/Bar (€)", bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+
+        // --- Populate Table Rows ---
+        // Loop through the `trades` array and populate one row per trade.
+        for i = 0 to array.size(trades) - 1
+            trade = array.get(trades, i)
+            row_color = trade.win_loss_text == "WIN" ? WIN_BG_COLOR : LOSS_BG_COLOR
+
+            table.cell(trades_table, 0, i + 1, trade.entry_date, bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.left)
+            table.cell(trades_table, 1, i + 1, trade.exit_date, bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.left)
+            table.cell(trades_table, 2, i + 1, str.tostring(trade.candle_count), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.center)
+            table.cell(trades_table, 3, i + 1, str.tostring(trade.total_invested, "#.##"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 4, i + 1, str.tostring(trade.average_price, "#.####"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 5, i + 1, str.tostring(trade.exit_price, "#.####"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 6, i + 1, str.tostring(trade.quantity, "#.######"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 7, i + 1, str.tostring(trade.amount_sold, "#.##"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 8, i + 1, str.tostring(trade.high_period, "#.####"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 9, i + 1, str.tostring(trade.low_period, "#.####"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 10, i + 1, str.tostring(trade.movement_percent, "#.##") + "%", bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 11, i + 1, str.tostring(trade.volume_total, "###,###,###"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 12, i + 1, str.tostring(trade.volume_avg, "###,###,###"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 13, i + 1, str.tostring(trade.pnl, "+#.##;-#.##"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 14, i + 1, str.tostring(trade.pnl_percent, "+#.##;-#.##") + "%", bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 15, i + 1, str.tostring(trade.roi, "+#.##;-#.##") + "%", bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+            table.cell(trades_table, 16, i + 1, trade.win_loss_text, bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.center)
+            table.cell(trades_table, 17, i + 1, str.tostring(trade.gain_per_candle, "+#.##;-#.##"), bgcolor=row_color, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+
+    else
+        // If there are no trades, display a message in the table.
+        table.cell(trades_table, 0, 0, "No trades to display.", width=18, text_halign=text.align.center)
+
+    // --- Global Statistics Calculation (US-11) ---
+    // This section calculates the 14 required global metrics.
+    int total_trades = array.size(trades)
+    int win_count = 0
+    int loss_count = 0
+    float total_pnl = 0.0
+    float total_invested_all_trades = 0.0
+    float total_amount_sold_all_trades = 0.0
+    float sum_of_wins = 0.0
+    float sum_of_losses = 0.0
+
+    if total_trades > 0
+        for i = 0 to total_trades - 1
+            trade = array.get(trades, i)
+            total_pnl += trade.pnl
+            total_invested_all_trades += trade.total_invested
+            total_amount_sold_all_trades += trade.amount_sold
+            if trade.pnl > 0
+                win_count += 1
+                sum_of_wins += trade.pnl
+            else
+                loss_count += 1
+                sum_of_losses += trade.pnl
+
+    float win_rate = total_trades > 0 ? (win_count / total_trades) * 100 : 0.0
+    float avg_pnl = total_trades > 0 ? total_pnl / total_trades : 0.0
+    float avg_pnl_percent = total_invested_all_trades > 0 ? (total_pnl / total_invested_all_trades) * 100 : 0.0
+    float avg_win_gain = win_count > 0 ? sum_of_wins / win_count : 0.0
+    float avg_loss = loss_count > 0 ? sum_of_losses / loss_count : 0.0
+    string gain_loss_ratio_str = avg_loss != 0 ? str.tostring(math.abs(avg_win_gain / avg_loss), "#.##") : "N/A"
+
+    // --- Global Summary Display (US-10) ---
+    // This table will display the calculated global statistics.
+    var table summary_table = table.new(position.bottom_right, 2, 16, border_width=1)
+    color SUMMARY_BG_COLOR = color.new(color.from_hex("#E8F4F8"), 0)
+
+    // Use a dynamic row index to avoid overlaps.
+    int row_index = 0
+
+    // Header
+    table.cell(summary_table, 0, row_index, "GLOBAL SUMMARY - BACKTEST", colspan=2, bgcolor=HEADER_BG_COLOR, text_color=TEXT_COLOR_DARK, text_halign=text.align.center)
+    row_index += 1
+
+    // Populate summary table
+    table.cell(summary_table, 0, row_index, "Total Trades (Closed)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(total_trades), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+
+    // Add a row for the open position if one exists at the end of the chart.
+    if position_open
+        table.cell(summary_table, 0, row_index, "Open Position", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+        table.cell(summary_table, 1, row_index, "1 (not included in stats)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+        row_index += 1
+
+    table.cell(summary_table, 0, row_index, "Winning Trades", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(win_count) + " (" + str.tostring(win_rate, "#.##") + "%)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    float loss_rate = total_trades > 0 ? (loss_count / total_trades) * 100 : 0.0
+    table.cell(summary_table, 0, row_index, "Losing Trades", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(loss_count) + " (" + str.tostring(loss_rate, "#.##") + "%)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Win Rate", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(win_rate, "#.##") + "%", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 2 // Add a separator row
+
+    table.cell(summary_table, 0, row_index, "Total P&L (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(total_pnl, "+#.##;-#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Total P&L (%)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(avg_pnl_percent, "+#.##;-#.##") + "%", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Avg P&L per Trade (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(avg_pnl, "+#.##;-#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 2 // Add a separator row
+
+    table.cell(summary_table, 0, row_index, "Avg WIN Gain (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(avg_win_gain, "+#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Avg LOSS (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(avg_loss, "#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Gain/Loss Ratio", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, gain_loss_ratio_str, bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 2 // Add a separator row
+
+    table.cell(summary_table, 0, row_index, "Total Invested (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(total_invested_all_trades, "#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
+    row_index += 1
+    table.cell(summary_table, 0, row_index, "Total Withdrawn (€)", bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT)
+    table.cell(summary_table, 1, row_index, str.tostring(total_amount_sold_all_trades, "#.##"), bgcolor=SUMMARY_BG_COLOR, text_color=TEXT_COLOR_LIGHT, text_halign=text.align.right)
